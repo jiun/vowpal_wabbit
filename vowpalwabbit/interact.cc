@@ -11,6 +11,7 @@ license as described in the file LICENSE.
 struct interact
 { unsigned char n1, n2;  //namespaces to interact
   features feat_store;
+  bool cosine_similarity;
   vw *all;
   float n1_feat_sq;
   float total_sum_feat_sq;
@@ -33,6 +34,50 @@ bool contains_valid_namespaces(features& f_src1, features& f_src2, interact& in)
   }
 
   return true;
+}
+
+float cosine_similarity(features& f_src1, features& f_src2, interact& in)
+{ 
+  uint64_t weight_mask = in.all->reg.weight_mask;
+  uint64_t base_id1 = f_src1.indicies[0] & weight_mask;
+  uint64_t base_id2 = f_src2.indicies[0] & weight_mask;
+
+  uint64_t prev_id1 = 0;
+  uint64_t prev_id2 = 0;
+
+  float dot_product=0., norm1=0., norm2=0.;
+  for(size_t i1 = 1, i2 = 1; i1 < f_src1.size() && i2 < f_src2.size();)
+  { // calculating the relative offset from the namespace offset used to match features
+    uint64_t cur_id1 = (uint64_t)(((f_src1.indicies[i1] & weight_mask) - base_id1) & weight_mask);
+    uint64_t cur_id2 = (uint64_t)(((f_src2.indicies[i2] & weight_mask) - base_id2) & weight_mask);
+
+    // checking for sorting requirement
+    if (cur_id1 < prev_id1)
+    { cout << "interact features are out of order: " << cur_id1 << " > " << prev_id1 << ". Skipping features." << endl;
+      return -2.;
+    }
+
+    if (cur_id2 < prev_id2)
+    { cout << "interact features are out of order: " << cur_id2 << " > " << prev_id2 << ". Skipping features." << endl;
+      return -2.;
+    }
+
+    if(cur_id1 == cur_id2)
+      { dot_product += f_src1.values[i1]*f_src2.values[i2];
+	norm1 += f_src1.values[i1]*f_src1.values[i1];
+	norm2 += f_src2.values[i2]*f_src2.values[i2];
+        i1++;
+        i2++;
+      }
+    else if (cur_id1 < cur_id2)
+      i1++;
+    else
+      i2++;
+  }
+  if (norm1 * norm2 == 0)
+    return -2.;
+  else 
+    return dot_product / sqrt(norm1 * norm2);
 }
 
 void multiply(features& f_dest, features& f_src2, interact& in)
@@ -99,10 +144,27 @@ void predict_or_learn(interact& in, LEARNER::base_learner& base, example& ec)
 
   in.feat_store.deep_copy_from(f1);
 
-  multiply(f1, f2, in);
-  ec.total_sum_feat_sq += f1.sum_feat_sq;
-  ec.num_features += f1.size();
+  if (in.cosine_similarity)
+    {
+      float csim = cosine_similarity(f1, f2, in);
 
+      // multiply(f1, f2, in);
+      // ec.total_sum_feat_sq += f1.sum_feat_sq;
+      // ec.num_features += f1.size();
+
+      f1.erase();
+      // wrong f1.push_back(in.feat_store.indicies[0], csim);
+      // f1.push_back(csim, *(in.feat_store.indicies.end - 1)+1]);
+      f1.push_back(csim, in.feat_store.indicies[0]);
+      ec.total_sum_feat_sq += csim*csim;
+      ec.num_features ++;
+   }
+  else
+    {
+      multiply(f1, f2, in);
+      ec.total_sum_feat_sq += f1.sum_feat_sq;
+      ec.num_features += f1.size();
+    }
   /*for(uint64_t i = 0;i < f1.size();i++)
     cout<<f1[i].weight_index<<":"<<f1[i].x<<" ";
     cout<<endl;*/
@@ -142,8 +204,13 @@ LEARNER::base_learner* interact_setup(vw& all)
     { cerr<<"Need two namespace arguments to interact: " << s << " won't do EXITING\n";
     return nullptr;
     }
+  new_options(all, "interact options")
+    ("cosine_similarity", "use cosine similarity instead of elementwise multiplication");
+  add_options(all);
 
   interact& data = calloc_or_throw<interact>();
+  if (all.vm.count("cosine_similarity"))
+    data.cosine_similarity = true;
 
   data.n1 = (unsigned char) s[0];
   data.n2 = (unsigned char) s[1];
